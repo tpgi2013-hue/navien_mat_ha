@@ -400,6 +400,11 @@ class NavienSmartCoordinator(DataUpdateCoordinator[dict[str, NavienDevice]]):
         기기가 `reported` 를 올려줄 때까지 기다린다. 명령이 shadow 에 들어간 시점의
         이벤트(`reported` 없는 `/accepted`)를 상태로 쓰면 HA 가 기기보다 앞서 나간다.
         """
+        # **앱과 같게 조작음을 요청한다.** 실측(앱 명령 캐처): 앱은 모든 조작에
+        # `beep: true` 를 싣는다. 이게 없으면 매트가 설정은 받되 샑 소리도 안 내고
+        # 화면도 안 깨운다 — 본체를 눌러봐야 바뀐 온도가 보였다.
+        if device.has_beep and "beep" not in desired:
+            desired = {"beep": True, **desired}
         # 무엇을 보냈는지 남긴다. 냉방은 「보낸 값이 그대로 돌아오는가」를 봐야
         # 닫히는 구간이라 이 기록이 근거가 된다.
         device.note_command(desired)
