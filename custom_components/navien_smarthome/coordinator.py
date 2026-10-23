@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import timedelta
@@ -86,6 +87,10 @@ class NavienSmartCoordinator(DataUpdateCoordinator[dict[str, NavienDevice]]):
         # 개인정보는 없다 — 개수와 키 이름뿐이다.
         self.drop_counts: dict[str, int] = {"mate_no_device": 0}
         self._mqtt: NavienSmartMqtt | None = None
+        # **기기마다 명령을 한 줄로 세운다.** 좌·우를 연달아 조작하면 HTTP 요청 두 개가
+        # 동시에 나가고, 서버에 도착하는 순서가 바뀌면 먼저 보낸 명령이 나중에 적용돼
+        # 뒤 명령을 덮는다 (실측: 좌 31 / 우 30 으로 남음).
+        self._send_locks: dict[str, asyncio.Lock] = {}
         self._skipped_logged: set[str] = set()
         # **폴링이 돌기는 하는지**를 남긴다.
         #
@@ -398,7 +403,9 @@ class NavienSmartCoordinator(DataUpdateCoordinator[dict[str, NavienDevice]]):
         # 무엇을 보냈는지 남긴다. 냉방은 「보낸 값이 그대로 돌아오는가」를 봐야
         # 닫히는 구간이라 이 기록이 근거가 된다.
         device.note_command(desired)
+        lock = self._send_locks.setdefault(device.device_id, asyncio.Lock())
         try:
-            await self.api.async_control(self.home_seq, device.raw, desired)
+            async with lock:
+                await self.api.async_control(self.home_seq, device.raw, desired)
         except NavienSmartAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
