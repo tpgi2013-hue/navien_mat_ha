@@ -37,6 +37,21 @@ from .mqtt import NavienSmartMqtt
 _LOGGER = logging.getLogger(__name__)
 
 
+def _zone_unchanged(device: NavienDevice, zone: str, value: Any) -> bool:
+    """이 구역 명령이 기기가 이미 보고한 상태와 똑같은가."""
+    if not isinstance(value, dict):
+        return False
+    axis = value.get("temperature") or value.get("level") or {}
+    want = axis.get("set") if isinstance(axis, dict) else None
+    current = device.zone_setting(zone)
+    return (
+        want is not None
+        and current is not None
+        and float(want) == current
+        and value.get("enable") == device.zone_enabled(zone)
+    )
+
+
 def _as_int(value: Any) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -405,6 +420,18 @@ class NavienSmartCoordinator(DataUpdateCoordinator[dict[str, NavienDevice]]):
         # 화면도 안 깨운다 — 본체를 눌러봐야 바뀐 온도가 보였다.
         if device.has_beep and "beep" not in desired:
             desired = {"beep": True, **desired}
+        # **바뀐 구역만 보낸다 — 앱이 그렇게 한다.** 실측(앱 명령 캐처): 좌측 온도만
+        # 바꾸면 `heater` 에 `left` 하나만 실린다. 안 바뀐 구역까지 실어 보내면 매트가
+        # 설정은 받되 「○○도로 설정되었습니다」 안내를 띄우지 않았다.
+        heater = desired.get("heater")
+        if isinstance(heater, dict) and len(heater) > 1:
+            changed = {
+                zone: value
+                for zone, value in heater.items()
+                if not _zone_unchanged(device, zone, value)
+            }
+            if changed:
+                desired = {**desired, "heater": changed}
         # 무엇을 보냈는지 남긴다. 냉방은 「보낸 값이 그대로 돌아오는가」를 봐야
         # 닫히는 구간이라 이 기록이 근거가 된다.
         device.note_command(desired)
