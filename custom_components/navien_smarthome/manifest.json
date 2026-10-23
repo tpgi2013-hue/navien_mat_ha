@@ -1,0 +1,16 @@
+{
+  "domain": "navien_smarthome",
+  "name": "Navien Smart (Mat)",
+  "codeowners": [
+    "@tpgi2013-hue"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/tpgi2013-hue/navien_mat_ha",
+  "integration_type": "hub",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/tpgi2013-hue/navien_mat_ha/issues",
+  "requirements": [
+    "paho-mqtt>=1.6.1"
+  ],
+  "version": "0.18.1.1"
+}
