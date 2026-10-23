@@ -27,6 +27,7 @@ from .api import (
 from .const import (
     DOMAIN,
     MIN_REFRESH_COOLDOWN_SECONDS,
+    MODE_HEAT,
     SERVICE_MATE,
     TOPIC_PREFIX,
     UPDATE_INTERVAL_SECONDS,
@@ -50,6 +51,28 @@ def _zone_unchanged(device: NavienDevice, zone: str, value: Any) -> bool:
         and float(want) == current
         and value.get("enable") == device.zone_enabled(zone)
     )
+
+
+def _app_number(value: Any) -> Any:
+    """앱처럼 정수 값은 정수로 보낸다 (`35.0` → `35`, `35.5` 는 그대로)."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _app_style_heater(heater: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for zone, value in heater.items():
+        if not isinstance(value, dict):
+            out[zone] = value
+            continue
+        zone_out = dict(value)
+        for axis in ("temperature", "level"):
+            inner = value.get(axis)
+            if isinstance(inner, dict) and "set" in inner:
+                zone_out[axis] = {**inner, "set": _app_number(inner["set"])}
+        out[zone] = zone_out
+    return out
 
 
 def _as_int(value: Any) -> int | None:
@@ -432,6 +455,15 @@ class NavienSmartCoordinator(DataUpdateCoordinator[dict[str, NavienDevice]]):
             }
             if changed:
                 desired = {**desired, "heater": changed}
+        # **앱 모양에 마저 맞춘다** (앱 명령 캐처와 대조).
+        #   - 이미 켜져 있으면 온도 명령에 `operationMode` 를 싣지 않는다. 앱은 온도만
+        #     보낸다. 매번 `operationMode: 1` 을 같이 보내면 매트가 「켜기」로 받아
+        #     「○○도로 설정되었습니다」 안내를 건너뛰었다
+        #   - 정수 온도는 정수로 (`35`, `35.5`). 앱이 그렇게 보낸다
+        if isinstance(desired.get("heater"), dict):
+            desired = {**desired, "heater": _app_style_heater(desired["heater"])}
+            if desired.get("operationMode") == MODE_HEAT and device.is_on:
+                desired = {k: v for k, v in desired.items() if k != "operationMode"}
         # 무엇을 보냈는지 남긴다. 냉방은 「보낸 값이 그대로 돌아오는가」를 봐야
         # 닫히는 구간이라 이 기록이 근거가 된다.
         device.note_command(desired)
