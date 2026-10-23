@@ -129,13 +129,6 @@ def extract_reported(payload: bytes, topic: str) -> tuple[str, dict[str, Any]] |
     reported = state.get("reported")
     if not isinstance(reported, dict):
         # 명령이 shadow 에 막 들어간 시점의 이벤트다. 기기는 아직 모른다.
-        if shadow_topic.endswith("/update/accepted"):
-            # **임시 캡처** — 앱·HA 명령의 봉투 전체를 비교하려고 남긴다.
-            _LOGGER.warning(
-                "NAVIEN_EVENT_CAPTURE topic=%s %s",
-                topic,
-                json.dumps(event, ensure_ascii=False),
-            )
         return None
 
     device_id = (reported.get("info") or {}).get("deviceId")
