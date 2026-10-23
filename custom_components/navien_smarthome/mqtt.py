@@ -129,6 +129,10 @@ def extract_reported(payload: bytes, topic: str) -> tuple[str, dict[str, Any]] |
     reported = state.get("reported")
     if not isinstance(reported, dict):
         # 명령이 shadow 에 막 들어간 시점의 이벤트다. 기기는 아직 모른다.
+        desired = state.get("desired")
+        if isinstance(desired, dict) and shadow_topic.endswith("/update/accepted"):
+            # **임시 캡처** — 앱이 보내는 명령 형식(조작음 등)을 확인하려고 남긴다.
+            _LOGGER.warning("NAVIEN_DESIRED_CAPTURE %s", json.dumps(desired, ensure_ascii=False))
         return None
 
     device_id = (reported.get("info") or {}).get("deviceId")
@@ -272,7 +276,7 @@ class NavienSmartMqtt:
 
         import paho.mqtt.client as mqtt  # 지연 임포트 — HA 부팅을 막지 않는다
 
-        # 앱이 쓰는 형식과 맞춤다 — `{uuid}-U{userSeq}`.
+        # 앱이 쓰는 형식과 맞춘다 — `{uuid}-U{userSeq}`.
         # `homeSeq` 를 쓰던 것을 고쳤다. A/B 로 확인했을 때 둘 다 구독은 됐지만,
         # 서버 정책이 나중에 clientId 를 보게 되면 앱과 다른 쪽이 먼저 막힌다.
         client_id = f"{uuid.uuid4()}-U{self._user_seq}"
