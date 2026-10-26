@@ -303,15 +303,27 @@ class NavienSmartBothThermostat(NavienSmartThermostat):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        """상세 화면 「속성」 칸에 좌·우 설정값을 따로 보여준다.
+
+        서모스탯 화면은 설정 다이얼이 하나뿐이라 좌우가 다르면 한쪽 값만 보인다.
+        키를 한글로 둔 것은 속성 칸에 키가 그대로 이름으로 표시되기 때문이다.
+        꺼진 구역의 설정값은 꺼짐용 값(27.5)이라 숫자 대신 「꺼짐」으로 적는다.
+        """
         attrs = super().extra_state_attributes
         device = self.device
         if attrs is None or device is None:
             return attrs
         attrs.pop("zone", None)
-        attrs["zones"] = list(device.zones)
         for zone in device.zones:
-            attrs[f"{zone}_temperature"] = device.zone_setting(zone)
-            attrs[f"{zone}_enabled"] = device.zone_enabled(zone)
+            label = device.zone_names.get(zone) or ZONE_NAMES.get(zone, zone)
+            value = device.zone_setting(zone)
+            if not device.is_on or device.zone_enabled(zone) is False:
+                text = "꺼짐"
+            elif value is None:
+                text = "—"
+            else:
+                text = f"{value:g}°"
+            attrs[f"{label} 설정"] = text
         return attrs
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
