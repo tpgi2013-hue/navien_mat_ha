@@ -27,9 +27,14 @@ from homeassistant.util.ssl import get_default_context
 
 from .api import AwsCredentials
 from .const import (
+    BOILER_PREFIX,
     IOT_ENDPOINT,
     IOT_REGION,
     IOT_SERVICE,
+    LEGACY_ACTUAL_FIELDS,
+    LEGACY_EXTRA_FIELDS,
+    LEGACY_RUNNING_TO_V2,
+    LEGACY_STATUS_TO_CONTROLLER,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +48,10 @@ _LOGGER = logging.getLogger(__name__)
 # 이게 없으면 기기가 스스로 뭔가 보낼 때까지 상태가 비어 있다.
 _ACCEPTED_SUFFIXES = ("/update/accepted", "/get/accepted")
 _RECONNECT_DELAYS = (5, 15, 30, 60, 120, 300)
+
+# 에어원 메시지를 매트 메시지와 가르는 기준. 앱도 구독 토픽 문자열로 판별한다
+# (`HomeViewModel` 의 `/airone/#` / `/mate/#` 분기).
+AIRONE_PREFIX = "airone"
 
 
 def _uri_encode(value: str) -> str:
@@ -140,6 +149,111 @@ def extract_reported(payload: bytes, topic: str) -> tuple[str, dict[str, Any]] |
     return device_id, reported
 
 
+def extract_airone_reported(
+    payload: bytes, topic: str, stats: dict[str, Any] | None = None
+) -> tuple[str, dict[str, Any]] | None:
+    """에어원 상태 메시지에서 `reported` 를 꺼낸다.
+
+    매트와 봉투가 다르다 — shadow 가 아니므로 `/update/accepted` 도 없고,
+    `state` 한 겹도 없다. `{topic, payload: {reported: {...}}}` 형태다
+    (`AironeGetStatus.AironeStatusEachRoom`).
+    """
+    try:
+        event = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _LOGGER.debug("JSON 이 아닌 에어원 메시지 무시: topic=%s", topic)
+        _bump(stats, "dropped_not_json")
+        return None
+    if not isinstance(event, dict):
+        _bump(stats, "dropped_not_json")
+        return None
+
+    inner = event.get("payload")
+    reported = inner.get("reported") if isinstance(inner, dict) else None
+    if reported is None and isinstance(inner, dict):
+        # 구세대는 `reported` 겹이 없는 평평한 프레임이다.
+        reported = normalize_legacy_status(inner)
+        if reported is not None:
+            _bump(stats, "legacy_normalized")
+    if not isinstance(reported, dict):
+        # 명령을 접수했다는 응답일 수 있다. 상태가 아니면 쓰지 않는다.
+        _bump(stats, "dropped_no_reported")
+        return None
+    # `idu`(실내기)도 받는다. 올인원 룸콘은 룸콘과 실내기가 한 덩어리라 상태를
+    # 이쪽으로 올릴 가능성이 있다 — `did` 에 이 필드가 실재한다.
+    # 값을 해석하지는 않는다. 받아서 진단에 담아 어떤 모양인지 보고 판단한다.
+    if not any(
+        key in reported for key in ("roomController", "odu", "airMonitor", "idu")
+    ):
+        # **조용히 버리지 않는다.** 이걸 DEBUG 로 두었더니 기본 설치에서 아무 흔적이
+        # 남지 않아, 상태가 안 오는 원인을 제보로도 가릴 수 없었다.
+        # 키 이름만 남긴다 — 값은 남기지 않는다.
+        _LOGGER.warning(
+            "에어원 상태 메시지의 모양을 알지 못해 쓰지 못했습니다 "
+            "(topic 끝=%s, 최상위 키=%s). 이 로그를 이슈에 붙여 주시면 "
+            "바로 넓힐 수 있습니다.",
+            topic.rsplit("/", 1)[-1],
+            sorted(reported),
+        )
+        _bump(stats, "dropped_unknown_shape")
+        if stats is not None:
+            stats["last_unknown_shape_keys"] = sorted(reported)
+        return None
+
+    # `{homeSeq}/airone/{deviceId}` 의 마지막 조각이 기기목록의 deviceId 다.
+    device_id = topic.rsplit("/", 1)[-1]
+    if not device_id or device_id == AIRONE_PREFIX:
+        controller = reported.get("roomController")
+        if isinstance(controller, dict):
+            device_id = str(controller.get("deviceId") or "")
+    if not device_id:
+        _bump(stats, "dropped_no_device_id")
+        return None
+    _bump(stats, "accepted")
+    return device_id, reported
+
+
+def normalize_legacy_status(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """구세대 평평한 상태 프레임을 신형 `reported` 모양으로 옮긴다.
+
+    **가장자리에서만 바꾼다.** 모델과 엔티티는 신형 어휘 하나만 알면 되도록
+    두는 편이, 세대마다 분기를 심는 것보다 검증된 신형 경로를 덜 흔든다.
+
+    설정값을 읽는다 — 이유는 `LEGACY_STATUS_TO_CONTROLLER` 위의 표 참조.
+    """
+    if "isRunning" not in payload:
+        return None
+
+    controller: dict[str, Any] = {}
+    running = LEGACY_RUNNING_TO_V2.get(payload.get("isRunning"))
+    if running is not None:
+        controller["running"] = running
+    for source, target in LEGACY_STATUS_TO_CONTROLLER.items():
+        if source in payload:
+            controller[target] = payload[source]
+
+    error_code = payload.get("errorCode")
+    if error_code is not None:
+        controller["error"] = {"code": error_code}
+
+    # 실외기가 실제로 하는 일. 제어 상태로 쓰지 않고 진단에서만 본다 —
+    # 조건에 따라 수시로 바뀌므로 이걸 모드로 읽으면 표시가 요동친다.
+    actual = {key: payload[key] for key in LEGACY_ACTUAL_FIELDS if key in payload}
+    reported: dict[str, Any] = {"roomController": controller}
+    if actual:
+        reported["legacyActual"] = actual
+
+    # 신형에 없는 값들. 해석해서 제어에 쓰지 않고 진단으로만 내보낸다.
+    extras = {
+        key: payload[field]
+        for field, (key, _label, _table) in LEGACY_EXTRA_FIELDS.items()
+        if payload.get(field) is not None
+    }
+    if extras:
+        reported["legacyExtras"] = extras
+    return reported
+
+
 def _bump(stats: dict[str, Any] | None, key: str) -> None:
     """집계만 올린다. 값은 담지 않는다.
 
@@ -163,6 +277,8 @@ class NavienSmartMqtt:
         credentials_provider: Callable[[], Awaitable[AwsCredentials | None]],
         on_reported: Callable[[str, dict[str, Any]], None],
         on_subscribed: Callable[[], Awaitable[None]] | None = None,
+        on_airone_reported: Callable[[str, dict[str, Any]], None] | None = None,
+        on_boiler_message: Callable[[str, Any], None] | None = None,
     ) -> None:
         self._hass = hass
         # 수신·폐기 집계. 개인정보는 없다 — 개수와 키 이름뿐이다.
@@ -172,6 +288,8 @@ class NavienSmartMqtt:
         self._prefixes = topic_prefixes or {"mate"}
         self._credentials_provider = credentials_provider
         self._on_reported = on_reported
+        self._on_airone_reported = on_airone_reported
+        self._on_boiler_message = on_boiler_message
         # 구독이 붙은 뒤에 초기 상태를 요청해야 한다. 순서가 뒤바뀌면 응답을 놓친다.
         self._on_subscribed = on_subscribed
         self._client_id = ""
@@ -320,6 +438,25 @@ class NavienSmartMqtt:
         _LOGGER.debug("MQTT 연결이 끊겼습니다 %s", args[:1])
 
     def _on_message(self, _client: Any, _userdata: Any, message: Any) -> None:
+        # 구독 토픽으로 갈린다 — 앱도 같은 방식이다. 봉투가 완전히 달라서
+        # 한 파서로 둘 다 다루면 한쪽이 조용히 버려진다.
+        if f"/{AIRONE_PREFIX}/" in message.topic:
+            _bump(self.stats, "airone_received")
+            self._handle_airone_message(message)
+            return
+        if f"/{BOILER_PREFIX}/" in message.topic:
+            # 보일러는 해석하지 않는다. 모양을 모르므로 받은 그대로 넘겨 진단에 담는다.
+            _bump(self.stats, "boiler_received")
+            if self._on_boiler_message is not None:
+                try:
+                    body: Any = json.loads(message.payload)
+                except (TypeError, ValueError):
+                    body = repr(message.payload[:500])
+                self._hass.loop.call_soon_threadsafe(
+                    self._on_boiler_message, message.topic, body
+                )
+            return
+
         _bump(self.stats, "mate_received")
         result = extract_reported(message.payload, message.topic)
         if result is None:
@@ -336,3 +473,28 @@ class NavienSmartMqtt:
         )
         # paho 스레드에서 HA 상태를 직접 건드리면 안 된다.
         self._hass.loop.call_soon_threadsafe(self._on_reported, device_id, reported)
+
+    def _handle_airone_message(self, message: Any) -> None:
+        if self._on_airone_reported is None:
+            _LOGGER.debug("에어원 메시지 무시 (처리기 없음): %s", message.topic)
+            _bump(self.stats, "airone_dropped_no_handler")
+            return
+        airone_stats: dict[str, Any] = {}
+        result = extract_airone_reported(message.payload, message.topic, airone_stats)
+        for key, value in airone_stats.items():
+            if key == "last_unknown_shape_keys":
+                self.stats["airone_last_unknown_shape_keys"] = value
+            else:
+                _bump(self.stats, f"airone_{key}")
+        if result is None:
+            _LOGGER.debug("에어원 이벤트 무시 (reported 없음): %s", message.topic)
+            return
+        device_id, reported = result
+        _LOGGER.debug(
+            "에어원 reported 수신: %s roomController=%s",
+            device_id,
+            reported.get("roomController"),
+        )
+        self._hass.loop.call_soon_threadsafe(
+            self._on_airone_reported, device_id, reported
+        )

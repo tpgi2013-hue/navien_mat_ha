@@ -1,16 +1,16 @@
 {
   "domain": "navien_smarthome",
-  "name": "Navien Smart (Mat)",
+  "name": "Navien Smart (patched)",
   "codeowners": [
-    "@tpgi2013-hue"
+    "@ripe-avocado"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/tpgi2013-hue/navien_mat_ha",
+  "documentation": "https://github.com/ripe-avocado/navien_smart_ha",
   "integration_type": "hub",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/tpgi2013-hue/navien_mat_ha/issues",
+  "issue_tracker": "https://github.com/ripe-avocado/navien_smart_ha/issues",
   "requirements": [
     "paho-mqtt>=1.6.1"
   ],
-  "version": "0.18.1.4"
+  "version": "0.21.1.1"
 }

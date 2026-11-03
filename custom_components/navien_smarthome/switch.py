@@ -20,9 +20,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NavienSmartConfigEntry
+from .airone import AironeDevice
 from .const import MODE_HEAT, MODE_POWER_OFF
 from .coordinator import NavienSmartCoordinator
-from .entity import NavienSmartEntity
+from .entity import AironeEntity, NavienSmartEntity
 from .models import NavienDevice
 
 
@@ -45,6 +46,9 @@ async def async_setup_entry(
         NavienSmartChildLockSwitch(coordinator, device)
         for device in (coordinator.data or {}).values()
         if device.has_lock_mode
+    )
+    entities.extend(
+        AironePowerSwitch(coordinator, device) for device in coordinator.airone.values()
     )
     async_add_entities(entities)
 
@@ -135,3 +139,47 @@ class NavienSmartChildLockSwitch(NavienSmartEntity, SwitchEntity):
         await self.coordinator.async_send(
             device, device.build_child_lock_desired(locked)
         )
+
+
+class AironePowerSwitch(AironeEntity, SwitchEntity):
+    """`running` 1/2 로 전원을 끄고 켠다.
+
+    구세대는 이 값이 반대다(운전=2). `coordinator` 가 구세대를 걸러내므로 여기서는
+    신형 규약만 다룬다 — 세대 판정을 두 곳에 두면 한쪽만 고치는 실수가 난다.
+    """
+
+    # 매트 전원과 같은 이유로 기기 대표다 (위 `NavienSmartPowerSwitch` 주석).
+    # 에어원도 전원은 기기당 하나이고, 운전모드·풍량·희망습도는 여럿이라
+    # 각자 이름을 유지한다.
+    _attr_name = None
+    _attr_icon = "mdi:power"
+
+    def __init__(self, coordinator: NavienSmartCoordinator, device: AironeDevice) -> None:
+        super().__init__(coordinator, device)
+        self._attr_unique_id = f"{device.device_id}_power"
+
+    @property
+    def is_on(self) -> bool | None:
+        device = self.device
+        if device is None or device.running is None:
+            return None
+        return device.is_on
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        device = self.device
+        if device is None:
+            return None
+        return {"running": device.running, "state": device.running_name}
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_power(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_power(False)
+
+    async def _async_power(self, turn_on: bool) -> None:
+        device = self.device
+        if device is None:
+            return
+        await self.coordinator.async_airone_power(device, turn_on)

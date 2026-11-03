@@ -3,7 +3,7 @@
 단계는 연속량이 아니다. 9개의 이산 상태이고, 그중 `0` 은 숫자가 아니라
 **운전 대기** 라는 상태다. 슬라이더로 만들면 세 가지가 어긋난다.
 
-- 조준해야 한다 — 좁은 카드 행에서 한 칸 오버슛트가 실제 온도 차이로 이어진다
+- 조준해야 한다 — 좁은 카드 행에서 한 칸 오버슈트가 실제 온도 차이로 이어진다
 - 눈금에 이름을 못 붙인다 — 앱은 `운전 대기` 라고 부르는데 `0 단계` 로 보인다
 - 서버가 알려주는 `rangeMin` 이 1이라 0을 넣을 수 없다. 표시는 되는데 설정이 안 됐다
 
@@ -23,7 +23,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NavienSmartConfigEntry
+from .airone import AironeDevice
 from .const import (
+    AIRONE_OPTION_SLEEP,
     LEVEL_STANDBY,
     MAT_VOLUME_NAMES,
     SEASON_NAMES,
@@ -31,7 +33,7 @@ from .const import (
     level_label,
 )
 from .coordinator import NavienSmartCoordinator
-from .entity import NavienSmartEntity
+from .entity import AironeEntity, NavienSmartEntity
 from .models import NavienDevice
 
 
@@ -60,6 +62,18 @@ async def async_setup_entry(
         entities.extend(
             NavienSmartLevelSelect(coordinator, device, zone) for zone in device.zones
         )
+
+    for airone in coordinator.airone.values():
+        # 서버가 고를 수 있는 조합을 알려주지 않으면 만들지 않는다.
+        if airone.selectable_modes:
+            entities.append(AironeModeSelect(coordinator, airone))
+        # 풍량은 모드에 따라 고를 수 있는 값이 달라진다. 어떤 모드에서든 두 개
+        # 이상 고를 수 있을 때만 만든다.
+        if any(
+            len(airone.fan_choices(mode.mode, mode.option)) > 1
+            for mode in airone.selectable_modes
+        ):
+            entities.append(AironeFanSelect(coordinator, airone))
 
     async_add_entities(entities)
 
@@ -182,7 +196,14 @@ class NavienSmartLevelSelect(NavienSmartEntity, SelectEntity):
 
         # 서버는 `rangeMin` 을 1로 주지만 기기는 0(운전 대기)을 받는다 — 실측 확인.
         # 그래서 0을 앞에 붙인다. 온도형에는 적용하지 않는다.
-        self._levels = [LEVEL_STANDBY, *range(low, high + 1)]
+        #
+        # **싱글에는 붙이지 않는다** (v0.21.1). 「운전 대기」는 좌우 중 한쪽을 끄는
+        # 것이고, 싱글은 끌 「한쪽」이 없다 — 앱도 막는다. 넣어 두면 누를 때 전원을
+        # 꺼야 하는데, 기기는 꺼져도 마지막 단계를 보고해서 「운전 대기를 눌렀는데
+        # 1단계」로 보인다. 싱글의 단계 목록은 「켜면 이 단계로 돈다」 하나만 뜻하고,
+        # 켜고 끄기는 전원 스위치가 맡는다.
+        steps = list(range(low, high + 1))
+        self._levels = [LEVEL_STANDBY, *steps] if len(device.zones) > 1 else steps
         self._attr_options = [level_label(value) for value in self._levels]
 
     @property
@@ -244,12 +265,141 @@ class NavienSmartLevelSelect(NavienSmartEntity, SelectEntity):
             # 명령이라 같은 자리를 쓴다 (이슈 #16).
             #
             # **한쪽만 대기로 내리는 것은 종전과 똑같다** — `build_zone_off` 가
-            # 같은 `heater` 를 만든다. 달라지는 것은 **마지막 남은 구역**을 내릴
-            # 때뿐이고, 그때는 기기가 어차피 막으므로 이유를 알린다.
+            # 같은 `heater` 를 만든다. **마지막 남은 구역**은 기기가 어차피 막으므로
+            # 이유를 알린다. 싱글은 이 항목이 목록에 없다 (v0.21.1).
             # (실기기 확인: 좌 0 인 상태에서 우를 0 으로 내리면 `0, 1` 로 남는다)
             await self.coordinator.async_send(
                 device, device.build_zone_off([self._zone])
             )
             return
+        # **전원을 켜지 않는다.** 꺼진 상태에서 단계를 바꾸면 기기가 그 값을 들고
+        # 있다가 다음에 켤 때 그 단계로 시작한다 (실기기 EME-500). 미리 맞춰 두는
+        # 쓰임새라 살린다.
         heater = device.build_heater_desired({self._zone: level})
         await self.coordinator.async_send(device, {"heater": heater})
+
+
+class AironeModeSelect(AironeEntity, SelectEntity):
+    """운전 모드.
+
+    선택 항목을 **서버 메타데이터(`did.roomController.mode`)에서만** 만든다.
+    모델 표를 코드에 넣지 않는다 — 매트에서 통한 방식과 같다.
+
+    앱과 같은 축으로 자른다 — 터보·절전·기저는 여기가 아니라 풍량 쪽이다.
+    그래야 목록이 짧고, 풍량만 바꾸려고 모드 목록을 뒤지지 않는다.
+    """
+
+    _attr_translation_key = "airone_mode"
+    _attr_icon = "mdi:air-filter"
+
+    def __init__(self, coordinator: NavienSmartCoordinator, device: AironeDevice) -> None:
+        super().__init__(coordinator, device)
+        self._attr_unique_id = f"{device.device_id}_mode"
+        self._modes = device.selectable_modes
+        self._attr_options = [mode.label for mode in self._modes]
+
+    @property
+    def current_option(self) -> str | None:
+        device = self.device
+        if device is None or device.mode is None:
+            return None
+        # 지금 상태가 어느 항목에 해당하는지 찾는다. 숙면은 옵션까지 봐야 갈린다.
+        for choice in self._modes:
+            if choice.mode != device.mode:
+                continue
+            if choice.is_sleep != (device.option == AIRONE_OPTION_SLEEP):
+                continue
+            return choice.label
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        device = self.device
+        if device is None:
+            return None
+        return {
+            "mode": device.mode,
+            "option": device.option,
+            # 앱이 보여주는 전체 문구. 자동화·템플릿에서 쓸 수 있게 남긴다.
+            "full_label": device.mode_label,
+        }
+
+    async def async_select_option(self, option: str) -> None:
+        device = self.device
+        if device is None:
+            return
+        try:
+            chosen = self._modes[(self._attr_options or []).index(option)]
+        except ValueError:
+            return
+        # 모드를 바꿀 때 풍량은 `build_mode_desired` 가 서버 값에서 골라 채운다.
+        await self.coordinator.async_airone_mode(device, chosen.mode, chosen.option)
+
+
+class AironeFanSelect(AironeEntity, SelectEntity):
+    """풍량.
+
+    **미풍·약풍·강풍·자동과 터보·절전·기저를 한 축에 둔다.** 앱이 그렇게 다룬다
+    (`AironeModeCode.labelFor` 의 두 번째 칸). 기기에 따라 앞쪽만 있거나 뒤쪽만
+    있는데, 어느 쪽이든 사용자에게는 「풍량」 하나로 보이는 것이 맞다.
+
+    지금 모드에서 서버가 알려준 조합만 보여준다.
+    """
+
+    _attr_translation_key = "airone_fan"
+    _attr_icon = "mdi:fan"
+
+    def __init__(self, coordinator: NavienSmartCoordinator, device: AironeDevice) -> None:
+        super().__init__(coordinator, device)
+        self._attr_unique_id = f"{device.device_id}_fan"
+
+    @property
+    def _choices(self) -> tuple[Any, ...]:
+        device = self.device
+        if device is None:
+            return ()
+        return device.fan_choices(device.mode, device.option)
+
+    @property
+    def options(self) -> list[str]:
+        return [choice.label for choice in self._choices]
+
+    @property
+    def available(self) -> bool:
+        """고를 것이 **하나도 없을 때만** 손을 뗀다.
+
+        **하나뿐인 것과 없는 것은 다르다.** 앱은 숙면에서 풍량을 「자동」으로
+        보여주면서 못 누르게만 한다 — 숨기지 않는다. 요리(강풍 하나)와
+        자동운전(자동 하나)도 같다.
+
+        `> 1` 로 두었더니 그 모드로 바꾸는 순간 엔티티가 통째로 빠졌다.
+        사용자에게는 「지금 풍량이 뭔지」가 사라지는 것이라 없느니만 못하다.
+        하나뿐이면 그 값을 보여준다 — 골라도 같은 값이라 바뀌는 것이 없다.
+        """
+        return super().available and bool(self._choices)
+
+    @property
+    def current_option(self) -> str | None:
+        device = self.device
+        if device is None:
+            return None
+        label = device.current_fan_label()
+        return label if label in self.options else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        device = self.device
+        if device is None:
+            return None
+        return {"option": device.option, "air_volume": device.air_volume}
+
+    async def async_select_option(self, option: str) -> None:
+        device = self.device
+        if device is None or device.mode is None:
+            return
+        chosen = next((c for c in self._choices if c.label == option), None)
+        if chosen is None:
+            return
+        await self.coordinator.async_airone_mode(
+            device, device.mode, chosen.option, air_volume=chosen.air_volume
+        )

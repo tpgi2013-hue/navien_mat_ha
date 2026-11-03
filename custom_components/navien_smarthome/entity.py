@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .airone import AironeDevice
 from .const import DOMAIN, MODEL_TYPE_LABELS
 from .coordinator import NavienSmartCoordinator
 from .models import NavienDevice
@@ -49,6 +52,92 @@ class NavienSmartEntity(CoordinatorEntity[NavienSmartCoordinator]):
     @property
     def device(self) -> NavienDevice | None:
         return (self.coordinator.data or {}).get(self._device_id)
+
+    @property
+    def available(self) -> bool:
+        device = self.device
+        return super().available and device is not None and device.available
+
+
+class AironeEntity(CoordinatorEntity[NavienSmartCoordinator]):
+    """에어원 엔티티 베이스.
+
+    매트와 기기 정보 구성이 다르다 — 실내기(방 컨트롤러)와 실외기가 각자 펌웨어를
+    가지므로 둘을 한 줄로 합친다. `modelType` 은 에어원에 없다.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: NavienSmartCoordinator, device: AironeDevice) -> None:
+        super().__init__(coordinator)
+        self._device_id = device.device_id
+        self._attr_unique_id = f"{device.device_id}"
+
+        firmware = device.rc_version
+        if firmware and device.odu_version:
+            firmware = f"{firmware} (실외기 {device.odu_version})"
+        elif not firmware and device.odu_version:
+            firmware = f"실외기 {device.odu_version}"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device.device_id)},
+            manufacturer="경동나비엔",
+            name=device.nickname,
+            model=device.model_name,
+            model_id=device.model_code or None,
+            serial_number=device.device_id,
+            sw_version=firmware,
+        )
+
+    @property
+    def device(self) -> AironeDevice | None:
+        return self.coordinator.airone.get(self._device_id)
+
+    @property
+    def available(self) -> bool:
+        device = self.device
+        return super().available and device is not None and device.available
+
+
+class AironeMonitorEntity(CoordinatorEntity[NavienSmartCoordinator]):
+    """에어모니터(공기질 센서 본체) 엔티티 베이스.
+
+    본체와 **별도 기기**로 만든다. 앱에서도 따로 등록·연결하는 부속이고,
+    자체 모델명·펌웨어를 가진다. `via_device` 로 본체에 매달아 관계를 남긴다.
+
+    `modelCode` 가 1000 미만이지만(실측 NAA-21DM=35) **제어 대상이 아니라**
+    세대 판정과 무관하다.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: NavienSmartCoordinator,
+        device: AironeDevice,
+        monitor: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        self._device_id = device.device_id
+        monitor_id = str(monitor.get("deviceId") or f"{device.device_id}_airmonitor")
+        self._monitor_id = monitor_id
+
+        model_code = monitor.get("modelCode")
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, monitor_id)},
+            manufacturer="경동나비엔",
+            name=f"{device.nickname} 에어모니터",
+            # 모델명을 코드에 적지 않는다. 서버가 코드만 주면 코드를 보여준다.
+            model="에어모니터",
+            model_id=str(model_code) if model_code is not None else None,
+            serial_number=monitor_id,
+            sw_version=monitor.get("version") or None,
+            via_device=(DOMAIN, device.device_id),
+        )
+
+    @property
+    def device(self) -> AironeDevice | None:
+        return self.coordinator.airone.get(self._device_id)
 
     @property
     def available(self) -> bool:

@@ -17,15 +17,16 @@ from typing import Any
 
 from .const import (
     CAPACITY_DOUBLE,
+    CELSIUS_STEPS,
     MAT_ERROR_NAMES,
     MAT_VOLUME_NAMES,
     MODE_HEAT,
     MODE_NAMES,
+    MODE_POWER_OFF,
     MODES_ON,
     SEASON_NAMES,
     SEASON_SUMMER,
     SERVICE_NAMES,
-    UNIT_CELSIUS,
     UNIT_LEVEL,
     ZONE_LEFT,
     ZONE_RIGHT,
@@ -96,7 +97,7 @@ class HeatControl:
 
     @property
     def is_celsius(self) -> bool:
-        return self.unit == UNIT_CELSIUS
+        return self.unit in CELSIUS_STEPS
 
     @property
     def is_known(self) -> bool:
@@ -106,7 +107,7 @@ class HeatControl:
     def step(self) -> float:
         """`<간격><축>` 인코딩의 앞쪽 숫자."""
         if self.is_celsius:
-            return 0.5
+            return CELSIUS_STEPS[self.unit]
         return 1.0
 
     @property
@@ -604,8 +605,8 @@ class NavienDevice:
             return float(temperature["set"])
         return None
 
-    def zone_is_off(self, zone: str, *, for_command: bool = False) -> bool | None:
-        """이 구역이 꺼져 있나. **모르면 `None`** — 꺼다고 단정하지 않는다.
+    def zone_is_off(self, zone: str, for_command: bool = False) -> bool | None:
+        """이 구역이 꺼져 있나. **모르면 `None`** — 껐다고 단정하지 않는다.
 
         **`enable` 을 먼저 본다. 앱이 그렇게 한다.**
 
@@ -647,7 +648,7 @@ class NavienDevice:
         가 함께 움직이므로 어느 쪽으로 봐도 답이 같다(실기기 확인).
         """
         if for_command and (entry := self._pending(zone)) is not None:
-            # 방금 보낸 명령이 이 구역을 켜거나 꺼다 — 기기 확인 전이라도 그것을 따른다.
+            # 방금 보낸 명령이 이 구역을 켜거나 껐다 — 기기 확인 전이라도 그것을 따른다.
             if entry["enable"] is not None:
                 return not entry["enable"]
         if self.is_on:
@@ -673,15 +674,20 @@ class NavienDevice:
         실기기로 확인했다 — 좌측이 0 인 상태에서 우측을 0 으로 내리면 명령이 안
         먹고 `0, 1` 로 남는다.
 
-        **전원을 대신 꺼주지 않는다.** 앱도 그렇게 하지 않는다 — 막고 알린다.
+        **좌우 분리 매트는 전원을 대신 꺼주지 않는다.** 앱도 그렇게 하지 않는다 —
+        막고 알린다.
 
             if (heatType != 2 && heatType != 1) return true;   // 진행
             CustomToast.show(mate_dual_temp_batch_control_one_side_off);
             return false;                                       // 막는다
 
-        사용자가 시킨 것은 「구역 하나 끄기」인데 기기 전원을 끄는 것은 **시키지
-        않은 일**이다. 앱이 안내하는 대로 전원 스위치를 쓰라고 알린다.
-        `powerCtrl` 게이트를 걷어내서 이제 모든 매트에 그 스위치가 있다.
+        전원을 다시 켜면 양쪽이 다 켜진다(이슈 #19 실측). 마지막 한쪽을 끄면서
+        전원을 끄면 「한쪽만 쓰던 구성」이 다음에 켤 때 사라진다.
+
+        **싱글 매트는 전원을 끈다** (v0.21.0). 구역이 하나라 사라질 구성이 없고,
+        막으면 온도조절기의 「꺼짐」· 음성 비서의 「꺼줘」· 자동화의 끄기가 **항상
+        실패한다** — 셋 다 이 길로 온다. 앱과 다르지만, 앱은 같은 화면에 전원
+        버튼이 있고 HA 카드에는 없다.
         """
         control = self.active_control
         if control is None or not control.is_known:
@@ -702,12 +708,12 @@ class NavienDevice:
             if zone not in target
         )
         if not stays_on:
+            if len(self.zones) == 1:
+                return {"operationMode": MODE_POWER_OFF}
             # 앱 문구 그대로 (`strings.xml`).
             raise ValueError(
                 "이미 다른 편측이 운전대기 상태입니다. "
                 "난방을 끄시려면 매트 전원을 종료해 주세요."
-                if len(self.zones) > 1
-                else "난방을 끄시려면 매트 전원을 종료해 주세요."
             )
 
         heater = self.build_heater_desired(

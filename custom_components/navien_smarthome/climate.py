@@ -1,4 +1,4 @@
-"""온도형 매트의 온도조절기 (`heatControl.unit == "0.5C"`).
+"""온도형 매트의 온도조절기 (`heatControl.unit` 이 `0.5C` · `1.0C`).
 
 온도형은 `temperature.current` 를 함께 보내주므로 `climate` 가 맞다 — 서모스탯
 카드의 현재 온도 칸이 채워진다.
@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.climate import (
+    ATTR_HVAC_MODE,
     ClimateEntity,
     ClimateEntityFeature,
     HVACAction,
@@ -47,7 +48,7 @@ async def async_setup_entry(
             NavienSmartThermostat(coordinator, device, zone) for zone in device.zones
         )
         # 좌우 분리 매트는 **한 명령으로 양쪽을 같이 다루는** 엔티티를 하나 더 둔다.
-        # 템플릿으로 두 엔티티를 묶으면 명령이 두 번 나가서 서로 덮어쓴다.
+        # 템플릿으로 두 엔티티를 묶으면 명령이 두 번 나간다.
         if device.is_double and len(device.zones) > 1:
             entities.append(NavienSmartBothThermostat(coordinator, device))
     async_add_entities(entities)
@@ -118,7 +119,7 @@ class NavienSmartThermostat(NavienSmartEntity, ClimateEntity):
     def available(self) -> bool:
         """냉방 중에도 쓴다.
 
-        v0.9.0 까지는 냉방이면 손을 뗀다 — 값 체계를 몰랐기 때문이다. 이제
+        v0.9.0 까지는 냉방이면 손을 뗐다 — 값 체계를 몰랐기 때문이다. 이제
         `coolControl`(범위·간격·고온경고선)이 서버에서 오고, 설정값이 난방과 같은
         `heater.<구역>.temperature.set` 으로 오는 것을 실기기 제보로 관측했다.
 
@@ -148,7 +149,7 @@ class NavienSmartThermostat(NavienSmartEntity, ClimateEntity):
             return None
         # **모르는 것을 「꺼짐」이라 하지 않는다.** `is_on` 은 `operationMode` 가
         # 없을 때 `False` 를 돌려주는데, 그것을 그대로 쓰면 상태가 아직 안 온
-        # 기기를 꺼다고 단정한다 — 사계절 제보에서 좌우 모두 「꺼짐」으로 보인
+        # 기기를 껐다고 단정한다 — 사계절 제보에서 좌우 모두 「꺼짐」으로 보인
         # 원인이다.
         if device.operation_mode is None:
             return None
@@ -219,9 +220,22 @@ class NavienSmartThermostat(NavienSmartEntity, ClimateEntity):
             changes={zone: value for zone in zones},
             enables={zone: True for zone in zones},
         )
-        await self.coordinator.async_send(
-            device, {"operationMode": MODE_HEAT, "heater": heater}
-        )
+        desired: dict[str, Any] = {"heater": heater}
+        # **꺼져 있으면 온도만 저장한다** (v0.21.0). 앱 홈 카드가 그렇게 보낸다 —
+        # `control-temp` 에 `operationMode` 가 없다. 기기는 그 값을 들고 있다가
+        # 켤 때 그 온도로 시작한다 (EQM-580 제보자 실기기 확인). 단계형도 같다.
+        #
+        # 켜려면 HA 규칙대로 `hvac_mode` 를 함께 준다. 상태를 아직 모르면 예전처럼
+        # 켜는 쪽으로 보낸다 — 켜져 있을 때 검증된 형태다.
+        hvac_mode = kwargs.get(ATTR_HVAC_MODE)
+        if hvac_mode is None:
+            if device.operation_mode is None or device.is_on:
+                desired["operationMode"] = MODE_HEAT
+        elif hvac_mode != HVACMode.OFF:
+            desired["operationMode"] = MODE_HEAT
+        await self.coordinator.async_send(device, desired)
+        if hvac_mode == HVACMode.OFF:
+            await self.async_set_hvac_mode(HVACMode.OFF)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         device = self.device
@@ -238,15 +252,15 @@ class NavienSmartThermostat(NavienSmartEntity, ClimateEntity):
             await self.coordinator.async_send(device, device.build_zone_on(zones))
             return
         # **`enable: false` 만으로는 안 꺼진다** (이슈 #16). 값을 `off_value` 까지
-        # 내려야 기기가 받는다. 남는 구역이 없으면 전원 끄기로 돌아간다 —
-        # 판단은 `build_zone_off` 안에 있다.
+        # 내려야 기기가 받는다. 남는 구역이 없으면 싱글은 전원을 끄고 좌우 분리는
+        # 막는다 — 판단은 `build_zone_off` 안에 있다.
         await self.coordinator.async_send(device, device.build_zone_off(zones))
 
 
 class NavienSmartBothThermostat(NavienSmartThermostat):
     """좌·우 통합 온도조절. **명령은 언제나 한 번에 양쪽을 싣는다.**
 
-    - 온도 설정 → 두 구역에 같은 값 + 둘 다 켬, 명령 1건
+    - 온도 설정 → 두 구역에 같은 값, 명령 1건. 꺼져 있으면 저장만 한다(v0.21.0)
     - 켜기 → 꺼져 있던 구역만 최저값으로 올림 (`build_zone_on`), 명령 1건
     - 끄기 → 기기가 마지막 구역을 끄는 것을 막으므로 **전원을 끈다**
     """
@@ -331,6 +345,7 @@ class NavienSmartBothThermostat(NavienSmartThermostat):
         if device is None:
             return
         if hvac_mode is HVACMode.OFF:
+            # 좌우 분리 매트는 마지막 한쪽을 끌 수 없다. 통합 엔티티의 「끄기」는 전원이다.
             await self.coordinator.async_send(device, {"operationMode": MODE_POWER_OFF})
             return
         await self.coordinator.async_send(device, device.build_zone_on(device.zones))
