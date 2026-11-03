@@ -1,0 +1,46 @@
+name: build-patched-main
+
+on:
+  push:
+    branches: [patch-0.21.1]
+    paths: ['.github/workflows/build.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: patch-0.21.1
+          fetch-depth: 0
+      - name: Build patched tree
+        run: |
+          set -e
+          cp -r patch /tmp/patch
+          git clone --depth 1 --branch v0.21.1 https://github.com/ripe-avocado/navien_smart_ha /tmp/up
+          mkdir /tmp/out
+          cp -r /tmp/up/custom_components /tmp/up/hacs.json /tmp/up/LICENSE /tmp/up/CHANGELOG.md /tmp/out/
+          find /tmp/out -name __pycache__ -prune -exec rm -rf {} +
+          python3 /tmp/patch/apply.py /tmp/out/custom_components/navien_smarthome
+          sed -i 's/"name": "Navien Smart"/"name": "Navien Smart (patched)"/' /tmp/out/hacs.json
+          mkdir /tmp/out/patch
+          cp /tmp/patch/apply.py /tmp/patch/spec.json /tmp/out/patch/
+          printf '%s\n' '# Navien Smart (patched)' '' 'Fork of [ripe-avocado/navien_smart_ha](https://github.com/ripe-avocado/navien_smart_ha) v0.21.1 (MIT).' 'Adds: pending-value overlay, per-device send lock, and a combined left/right climate entity.' '' 'Install via HACS custom repository (Integration).' > /tmp/out/README.md
+      - name: Commit to main and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B main origin/main
+          git rm -rq . || true
+          git clean -fdxq
+          cp -r /tmp/out/. .
+          git add -A
+          git commit -m 'v0.21.1.1: upstream v0.21.1 + pending overlay, send lock, combined entity'
+          git push origin main
+          gh release create v0.21.1.1 --target main --title 'v0.21.1.1' --notes 'Upstream v0.21.1 plus fixes for consecutive left/right commands and the combined left/right climate entity.'
